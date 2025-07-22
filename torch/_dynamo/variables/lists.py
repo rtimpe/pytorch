@@ -1300,6 +1300,12 @@ class ListIteratorVariable(IteratorVariable):
             ]
         )
 
+    def call_obj_hasattr(
+        self, tx: "InstructionTranslator", name: str
+    ) -> "VariableTracker":
+        assert self.python_type() == type(iter([]))
+        return variables.ConstantVariable.create(hasattr(iter([]), name))
+
 
 class TupleIteratorVariable(ListIteratorVariable):
     pass
