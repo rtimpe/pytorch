@@ -8,7 +8,7 @@ live in their respective VT files.
 """
 
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Generic
 
 from torch._C._dynamo import (
     get_type_slots,
@@ -26,6 +26,7 @@ from ..exc import (
     raise_type_error,
     unimplemented,
 )
+from ..source import GetItemSource
 from ..utils import istype
 from .base import NO_SUCH_SUBOBJ, VariableTracker
 from .constant import ConstantVariable
@@ -134,6 +135,11 @@ def type_implements_nb_float(obj_type: type) -> bool:
     return has_slot(number_slots, PyNumberSlots.NB_FLOAT)
 
 
+def type_implements_mp_subscript(obj_type: type) -> bool:
+    _, map_slots, _, _ = _get_cached_slots(obj_type)
+    return has_slot(map_slots, PyMappingSlots.MP_SUBSCRIPT)
+
+
 def maybe_get_python_type(obj: VariableTracker) -> type:
     try:
         return obj.python_type()
@@ -230,14 +236,29 @@ def vt_getitem(
     matching CPython's dispatch order.
     TODO(follow-up): Branch 2 (sq_item) for C extension types that only have
     tp_as_sequence (e.g. deque — Modules/_collectionsmodule.c:1888).
-    Branch 3 is handled by TypingVariable.mp_subscript_impl for typing module types
-    and by BuiltinVariable for builtin types like list[int].
+    Branch 3 delegates to cpython for builtin types (i.e. type[int] or list[int] - see BaseBuiltinVariable.call_method)
 
     Types that work via constant fold fallback (no dedicated mp_subscript_impl):
     TODO(follow-up): str (unicode_subscript, Objects/unicodeobject.c:13809)
     TODO(follow-up): bytes (bytes_subscript, Objects/bytesobject.c)
     """
-    return obj.mp_subscript_impl(tx, key)
+    obj_type = maybe_get_python_type(obj)
+    if type_implements_mp_subscript(obj_type):
+        return obj.mp_subscript_impl(tx, key)
+    if issubclass(obj_type, type):
+        cls = obj.as_python_constant()
+        if cls is type:
+            key_py = key.as_python_constant()
+            result = cls[key_py]
+            source = obj.source and GetItemSource(obj.source, key_py)
+            return VariableTracker.build(tx, result, source)
+        breakpoint()
+        try:
+            return obj.call_method(tx, "__class_getitem__", (key,), ())
+        except Unsupported:
+            raise_type_error(tx, f"{obj_type} object is not subscriptable")
+    # TODO error message
+    raise_type_error(tx, f"{obj_type} object is not subscriptable")
 
 
 def generic_int(tx: "InstructionTranslator", obj: VariableTracker) -> VariableTracker:
